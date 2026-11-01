@@ -1,10 +1,12 @@
 package com.example.data.jni
 
 import android.util.Log
+import java.security.MessageDigest
 
 /**
- * JNI Bridge interface preparing NEXUS for native Rust and C++ high-performance modules.
- * Implements fallback mechanisms if native binaries (.so) are not yet compiled or present.
+ * JNI Bridge interface for NEXUS native Rust/C++ modules.
+ * Strictly separates active native execution (libnexus_core_native.so) from Kotlin JVM fallback.
+ * Rule enforced: Kotlin fallback is NEVER presented as active native C++/Rust execution.
  */
 object NexusJniBridge {
 
@@ -18,17 +20,21 @@ object NexusJniBridge {
             try { Log.i(TAG, "Native C++/Rust library 'nexus_core_native' loaded successfully.") } catch (_: Throwable) {}
         } catch (e: UnsatisfiedLinkError) {
             isNativeLibraryLoaded = false
-            try { Log.w(TAG, "Native library 'nexus_core_native' not available. Falling back to Kotlin JNI simulation layer.") } catch (_: Throwable) {}
+            try { Log.w(TAG, "Native library 'nexus_core_native' not present. Active mode: KOTLIN_JVM_FALLBACK.") } catch (_: Throwable) {}
         }
     }
 
     fun isNativeActive(): Boolean = isNativeLibraryLoaded
 
+    fun getExecutionMode(): String {
+        return if (isNativeLibraryLoaded) "NATIVE_JNI_ACTIVE" else "KOTLIN_JVM_FALLBACK"
+    }
+
     fun getBridgeStatus(): String {
         return if (isNativeLibraryLoaded) {
             "RUST/C++ NATIVE CORE ACTIVE (libnexus_core_native.so)"
         } else {
-            "JNI READY (Kotlin Fallback Active - Awaiting C++/Rust dynamic link)"
+            "JNI READY [MODE: KOTLIN_JVM_FALLBACK - Binaire natif .so non compilé]"
         }
     }
 
@@ -40,12 +46,11 @@ object NexusJniBridge {
     external fun nativeChronosSyncTask(taskId: String): Boolean
     external fun nativeGetHardwareTelemetry(): String
 
-    // Safe Kotlin Wrappers with fallback logic
     fun getCoreVersion(): String {
         return if (isNativeLibraryLoaded) {
             try { nativeGetCoreVersion() } catch (e: Exception) { "v3.8-Native" }
         } else {
-            "v3.8-JNI-Ready (Rust/C++ Interface Bound)"
+            "v3.8-JVM-Fallback (Interface JNI déclarée, .so absent)"
         }
     }
 
@@ -53,15 +58,28 @@ object NexusJniBridge {
         return if (isNativeLibraryLoaded) {
             try { nativeExecuteBitNetInference(prompt, quantBits) } catch (e: Exception) { "Fallback" }
         } else {
-            "BitNet 2-Bit Quantized Inference via CPU Vector Extensions (AVX2/NEON Simulated): Processed '$prompt'"
+            val hash = MessageDigest.getInstance("SHA-256")
+                .digest("$prompt:$quantBits".toByteArray())
+                .joinToString("") { "%02x".format(it) }.take(12).uppercase()
+            "[MODE: KOTLIN_JVM_FALLBACK | Non-Natif] Traitement local JVM ($quantBits-bit émulé, SHA256:$hash) pour '$prompt'"
         }
     }
 
-    fun turbocompteAccelerate(threadCount: Int = 8): Long {
-        return if (isNativeLibraryLoaded) {
-            try { nativeTurbocompteAccelerate(threadCount) } catch (e: Exception) { 4800L }
-        } else {
-            4800L // 4.8x CPU & RAM Turbocompte Acceleration factor
+    /**
+     * If native library is loaded, invokes native C++ implementation.
+     * Otherwise performs a real JVM memory/CPU benchmark and returns the actual measured execution time in microseconds.
+     */
+    fun turbocompteAccelerate(threadCount: Int = 4): Long {
+        if (isNativeLibraryLoaded) {
+            return try { nativeTurbocompteAccelerate(threadCount) } catch (e: Exception) { 1L }
         }
+        val startNs = System.nanoTime()
+        var acc = 0L
+        val iterations = (threadCount.coerceIn(1, 16)) * 2500
+        for (i in 0 until iterations) {
+            acc += (i * 31L) xor (acc ushr 3)
+        }
+        val elapsedMicros = ((System.nanoTime() - startNs) / 1000L).coerceAtLeast(1L)
+        return if (acc == Long.MIN_VALUE) elapsedMicros + 1L else elapsedMicros
     }
 }

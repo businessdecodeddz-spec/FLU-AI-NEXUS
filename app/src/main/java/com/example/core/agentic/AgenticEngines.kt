@@ -127,11 +127,30 @@ class ExecutionEngineAgent(private val registry: ActionRegistry) {
     }
 }
 
-/** 9. VERIFICATION ENGINE: Validates post-execution proofs and generates mission signatures */
+/** 9. VERIFICATION ENGINE: Validates post-execution observable proofs, file artifacts & generates mission signatures */
 class VerificationEngineAgent {
     fun verifyResult(result: ActionResult): String {
         if (!result.success) return "VERIFICATION_FAILED"
-        val raw = "${result.toolId}:${result.executionTimeMs}:${result.verificationProof}"
+        if (result.verificationProof.isBlank() || result.verificationProof == "UNVERIFIED") {
+            return "VERIFICATION_FAILED_NO_PROOF"
+        }
+
+        // If an observable file/directory artifact path was produced, verify it actually exists on disk
+        val artifactPath = result.observableArtifactPath
+        var artifactDigest = "NO_FILE_ARTIFACT"
+        if (!artifactPath.isNullOrBlank()) {
+            val file = java.io.File(artifactPath)
+            if (!file.exists()) {
+                return "VERIFICATION_FAILED_MISSING_ARTIFACT"
+            }
+            if (file.isFile && file.length() == 0L) {
+                return "VERIFICATION_FAILED_EMPTY_ARTIFACT"
+            }
+            artifactDigest = "${file.name}:${if (file.isFile) file.length() else file.list()?.size ?: 0}"
+        }
+
+        val metricsPayload = result.observableMetrics.entries.sortedBy { it.key }.joinToString(",") { "${it.key}=${it.value}" }
+        val raw = "${result.toolId}:${result.classification.name}:${result.verificationProof}:$artifactDigest:$metricsPayload"
         return try {
             val digest = MessageDigest.getInstance("SHA-256")
             val hash = digest.digest(raw.toByteArray())
@@ -141,6 +160,7 @@ class VerificationEngineAgent {
         }
     }
 }
+
 
 /** 10. LEARNING ENGINE: Records procedural memory, performance stats & strategy metrics in Room */
 class LearningEngineAgent(private val dao: NexusDao) {

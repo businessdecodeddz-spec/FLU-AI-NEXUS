@@ -8,22 +8,35 @@ import com.example.data.model.AppRiskInfo
 import com.example.data.model.RiskLevel
 
 /**
- "NEXUS PERMISSION SCANNER"
- Scans installed Android packages for dangerous high-risk permissions.
+ * NEXUS PERMISSION SCANNER
+ * Scans installed Android packages for sensitive permissions using real PackageManager telemetry.
+ * Strictly distinguishes:
+ *  - Granted permissions (REQUESTED_PERMISSION_GRANTED)
+ *  - Requested (not yet granted) permissions
+ *  - Special Android access permissions (Overlay, Accessibility, Usage Stats, Install Packages)
+ *  - Declared background services
+ *
+ * RULE ENFORCED: Zero simulated/mock fallback. If 0 risky apps are present, returns an empty list.
  */
 class PermissionScanner(private val context: Context) {
 
-    private val dangerousPermissionsList = listOf(
-        "android.permission.SYSTEM_ALERT_WINDOW" to "Superposition d'écran (Risque de Phishing Overlay)",
-        "android.permission.BIND_ACCESSIBILITY_SERVICE" to "Service d'Accessibilité (Risque de Keylogger/Prise de contrôle)",
-        "android.permission.READ_SMS" to "Lecture des SMS (Risque d'interception 2FA)",
-        "android.permission.RECEIVE_SMS" to "Réception des SMS (Risque de vol de codes 2FA)",
-        "android.permission.RECORD_AUDIO" to "Accès Microphone en arrière-plan",
-        "android.permission.CAMERA" to "Accès Appareil Photo",
-        "android.permission.ACCESS_FINE_LOCATION" to "Géolocalisation précise permanente",
-        "android.permission.WRITE_SETTINGS" to "Modification des paramètres système",
-        "android.permission.PACKAGE_USAGE_STATS" to "Accès aux statistiques d'utilisation des apps",
-        "android.permission.REQUEST_INSTALL_PACKAGES" to "Autorisation d'installation d'APK tierces"
+    private data class PermissionDefinition(
+        val permission: String,
+        val label: String,
+        val isSpecialAccess: Boolean = false
+    )
+
+    private val trackedPermissions = listOf(
+        PermissionDefinition("android.permission.SYSTEM_ALERT_WINDOW", "Superposition d'écran (Overlay)", isSpecialAccess = true),
+        PermissionDefinition("android.permission.BIND_ACCESSIBILITY_SERVICE", "Service d'Accessibilité", isSpecialAccess = true),
+        PermissionDefinition("android.permission.READ_SMS", "Lecture des SMS"),
+        PermissionDefinition("android.permission.RECEIVE_SMS", "Réception des SMS"),
+        PermissionDefinition("android.permission.RECORD_AUDIO", "Microphone"),
+        PermissionDefinition("android.permission.CAMERA", "Appareil Photo"),
+        PermissionDefinition("android.permission.ACCESS_FINE_LOCATION", "Géolocalisation précise"),
+        PermissionDefinition("android.permission.WRITE_SETTINGS", "Modification des paramètres système", isSpecialAccess = true),
+        PermissionDefinition("android.permission.PACKAGE_USAGE_STATS", "Statistiques d'utilisation", isSpecialAccess = true),
+        PermissionDefinition("android.permission.REQUEST_INSTALL_PACKAGES", "Installation d'APK tierces", isSpecialAccess = true)
     )
 
     fun scanInstalledApps(): List<AppRiskInfo> {
@@ -31,39 +44,74 @@ class PermissionScanner(private val context: Context) {
         val pm = context.packageManager
 
         try {
-            val packages = pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)
+            val flags = PackageManager.GET_PERMISSIONS or PackageManager.GET_SERVICES
+            val packages = pm.getInstalledPackages(flags)
+
             for (pkg in packages) {
-                // Skip NEXUS core app itself
                 if (pkg.packageName == context.packageName) continue
 
-                val isSystem = (pkg.applicationInfo != null) &&
-                        ((pkg.applicationInfo!!.flags and ApplicationInfo.FLAG_SYSTEM) != 0)
+                val appInfo = pkg.applicationInfo
+                val isSystem = appInfo != null && ((appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0)
 
                 val requestedPerms = pkg.requestedPermissions ?: emptyArray()
-                val foundDangerous = mutableListOf<String>()
+                val permFlags = pkg.requestedPermissionsFlags ?: IntArray(0)
+                val declaredServicesCount = pkg.services?.size ?: 0
 
-                for (perm in requestedPerms) {
-                    val match = dangerousPermissionsList.find { it.first == perm }
-                    if (match != null) {
-                        foundDangerous.add(match.second)
+                val grantedSensitive = mutableListOf<String>()
+                val requestedOnlySensitive = mutableListOf<String>()
+                var hasSpecialAccess = false
+
+                for (i in requestedPerms.indices) {
+                    val permName = requestedPerms[i]
+                    val def = trackedPermissions.find { it.permission == permName } ?: continue
+                    val isGranted = if (i < permFlags.size) {
+                        (permFlags[i] and PackageInfo.REQUESTED_PERMISSION_GRANTED) != 0
+                    } else {
+                        false
+                    }
+
+                    if (def.isSpecialAccess) {
+                        hasSpecialAccess = true
+                    }
+
+                    val statusTag = when {
+                        def.isSpecialAccess && isGranted -> "[ACCÈS SPÉCIAL ACCORDÉ]"
+                        def.isSpecialAccess -> "[ACCÈS SPÉCIAL DEMANDÉ]"
+                        isGranted -> "[ACCORDÉE]"
+                        else -> "[DEMANDÉE - NON ACCORDÉE]"
+                    }
+
+                    val formatted = "${def.label} $statusTag"
+                    if (isGranted) {
+                        grantedSensitive.add(formatted)
+                    } else {
+                        requestedOnlySensitive.add(formatted)
                     }
                 }
 
-                if (foundDangerous.isNotEmpty()) {
-                    val appLabel = pkg.applicationInfo?.loadLabel(pm)?.toString() ?: pkg.packageName
+                val allFindings = grantedSensitive + requestedOnlySensitive
+                if (allFindings.isNotEmpty()) {
+                    val appLabel = appInfo?.loadLabel(pm)?.toString() ?: pkg.packageName
                     val level = when {
-                        foundDangerous.size >= 3 || foundDangerous.any { it.contains("Accessibilité") || it.contains("Superposition") } -> RiskLevel.CRITICAL
-                        foundDangerous.size >= 2 || foundDangerous.any { it.contains("SMS") } -> RiskLevel.HIGH
-                        else -> RiskLevel.MEDIUM
+                        grantedSensitive.size >= 3 || (hasSpecialAccess && grantedSensitive.isNotEmpty()) -> RiskLevel.CRITICAL
+                        grantedSensitive.size >= 2 || hasSpecialAccess -> RiskLevel.HIGH
+                        grantedSensitive.size == 1 -> RiskLevel.MEDIUM
+                        else -> RiskLevel.LOW
                     }
 
-                    val desc = when (level) {
-                        RiskLevel.CRITICAL -> "Accès critique détecté: ${foundDangerous.joinToString(", ")}. Risque de compromission des données."
-                        RiskLevel.HIGH -> "Accès à des données sensibles: ${foundDangerous.joinToString(", ")}."
-                        else -> "Permissions étendues: ${foundDangerous.joinToString(", ")}."
+                    val desc = buildString {
+                        append("${grantedSensitive.size} accordée(s), ${requestedOnlySensitive.size} simplement demandée(s)")
+                        if (declaredServicesCount > 0) {
+                            append(", $declaredServicesCount service(s) déclaré(s)")
+                        }
+                        append(". Détail : ${allFindings.joinToString(", ")}.")
                     }
 
-                    val action = if (isSystem) "Désactiver ou révoquer permissions" else "Désinstallation fortement recommandée"
+                    val action = when {
+                        isSystem -> "Vérifier ou révoquer les permissions accordées dans les paramètres Android"
+                        grantedSensitive.isNotEmpty() -> "Révoquer les permissions accordées ou désinstaller l'application"
+                        else -> "Aucune permission sensible accordée (surveillance passive)"
+                    }
 
                     detectedRisks.add(
                         AppRiskInfo(
@@ -71,76 +119,17 @@ class PermissionScanner(private val context: Context) {
                             appName = appLabel,
                             riskLevel = level,
                             isSystemApp = isSystem,
-                            dangerousPermissions = foundDangerous,
+                            dangerousPermissions = allFindings,
                             riskDescription = desc,
                             suggestedAction = action
                         )
                     )
                 }
             }
-        } catch (e: Exception) {
-            // Fallback or permission check handling
-        }
-
-        // If no external non-system third party high-risk apps are found, provide comprehensive system audit sample packages
-        if (detectedRisks.isEmpty()) {
-            detectedRisks.addAll(getMockSystemAuditApps())
+        } catch (_: Exception) {
+            // Return only real detected entries; never inject fake fallback apps
         }
 
         return detectedRisks.sortedBy { it.riskLevel }
-    }
-
-    private fun getMockSystemAuditApps(): List<AppRiskInfo> {
-        return listOf(
-            AppRiskInfo(
-                packageName = "com.unverified.cleaner.pro",
-                appName = "Ultra Cleaner & Booster",
-                riskLevel = RiskLevel.CRITICAL,
-                isSystemApp = false,
-                dangerousPermissions = listOf(
-                    "Superposition d'écran (Risque de Phishing Overlay)",
-                    "Service d'Accessibilité (Risque de Keylogger)",
-                    "Lecture des SMS (Risque d'interception 2FA)"
-                ),
-                riskDescription = "Application suspecte demandant un accès complet à l'accessibilité et à l'interception de SMS.",
-                suggestedAction = "Désinstallation d'urgence suggérée par System Guard"
-            ),
-            AppRiskInfo(
-                packageName = "com.unknown.tracker.gps",
-                appName = "Smart GPS Locator Free",
-                riskLevel = RiskLevel.HIGH,
-                isSystemApp = false,
-                dangerousPermissions = listOf(
-                    "Géolocalisation précise permanente",
-                    "Accès Microphone en arrière-plan"
-                ),
-                riskDescription = "Collecte la position GPS et enregistre l'audio en tâche de fond sans justification.",
-                suggestedAction = "Désinstaller ou révoquer la géolocalisation"
-            ),
-            AppRiskInfo(
-                packageName = "com.flashlight.bright.led",
-                appName = "Super Torch Flashlight",
-                riskLevel = RiskLevel.HIGH,
-                isSystemApp = false,
-                dangerousPermissions = listOf(
-                    "Accès Appareil Photo",
-                    "Lecture des SMS (Risque d'interception 2FA)"
-                ),
-                riskDescription = "Une application lampe de poche n'a pas besoin de lire vos SMS secrets.",
-                suggestedAction = "Désinstallation recommandée"
-            ),
-            AppRiskInfo(
-                packageName = "com.thirdparty.social.tool",
-                appName = "Social Auto-Liker",
-                riskLevel = RiskLevel.MEDIUM,
-                isSystemApp = false,
-                dangerousPermissions = listOf(
-                    "Accès aux statistiques d'utilisation des apps",
-                    "Modification des paramètres système"
-                ),
-                riskDescription = "Accès étendu aux métadonnées d'utilisation d'autres applications.",
-                suggestedAction = "Gel du processus conseillé"
-            )
-        )
     }
 }

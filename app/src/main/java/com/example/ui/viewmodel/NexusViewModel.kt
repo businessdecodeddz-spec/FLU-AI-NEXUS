@@ -104,6 +104,8 @@ class NexusViewModel(application: Application) : AndroidViewModel(application) {
     val systemStorageItems = core.storageGovernor.systemItems
     val userStorageItems = core.storageGovernor.userItems
     val storageGovernorLogs = core.storageGovernor.governorLogs
+    val driveConnectionState = core.storageGovernor.driveConnectionState
+    val lastDriveSyncProof = core.storageGovernor.lastDriveSyncProof
 
     // Predictive Brain & Digital Twin Flows
     val predictiveAlerts = core.predictiveBrain.activeAlerts
@@ -168,18 +170,76 @@ class NexusViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startTelemetryLoop() {
         viewModelScope.launch {
+            core.missionManager?.restoreMissionsFromDatabase()
+            var lastRxBytes = android.net.TrafficStats.getTotalRxBytes().coerceAtLeast(0L)
+            var lastTxBytes = android.net.TrafficStats.getTotalTxBytes().coerceAtLeast(0L)
+            var lastSampleMs = System.currentTimeMillis()
+
             while (true) {
-                delay(3000)
-                val cpu = (12..38).random().toFloat()
-                val ram = (1850..2200).random()
-                val dl = (3200..6500).random()
-                val ul = (800..1800).random()
+                val app = getApplication<Application>()
+                val runtime = Runtime.getRuntime()
+                val cores = runtime.availableProcessors().coerceAtLeast(1)
+                val activeThreads = Thread.activeCount()
+                val cpuEstimate = ((activeThreads.toFloat() / (cores * 4f)) * 100f).coerceIn(2f, 98f)
+
+                var ramUsed = ((runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)).toInt()
+                var ramTotal = (runtime.maxMemory() / (1024 * 1024)).toInt().coerceAtLeast(512)
+                try {
+                    val am = app.getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+                    val memInfo = android.app.ActivityManager.MemoryInfo()
+                    am?.getMemoryInfo(memInfo)
+                    if (memInfo.totalMem > 0) {
+                        ramTotal = (memInfo.totalMem / (1024 * 1024)).toInt()
+                        ramUsed = ((memInfo.totalMem - memInfo.availMem) / (1024 * 1024)).toInt()
+                    }
+                } catch (_: Throwable) {}
+
+                var batLevel = core.readBatteryLevel()
+                var batTemp = 25.0f
+                try {
+                    val intent = app.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+                    val lvl = intent?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
+                    val scale = intent?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100) ?: 100
+                    if (lvl >= 0 && scale > 0) batLevel = (lvl * 100) / scale
+                    val tempTenths = intent?.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, 250) ?: 250
+                    batTemp = tempTenths / 10.0f
+                } catch (_: Throwable) {}
+
+                var storageUsedGb = _telemetry.value.storageUsedGb
+                var storageTotalGb = _telemetry.value.storageTotalGb
+                try {
+                    val statFs = android.os.StatFs(app.filesDir.absolutePath)
+                    if (statFs.totalBytes > 0) {
+                        storageTotalGb = (statFs.totalBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)).toFloat()
+                        val usedBytes = (statFs.totalBytes - statFs.availableBytes).coerceAtLeast(0L)
+                        storageUsedGb = (usedBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)).toFloat()
+                    }
+                } catch (_: Throwable) {}
+
+                val nowMs = System.currentTimeMillis()
+                val elapsedSec = ((nowMs - lastSampleMs) / 1000.0).coerceAtLeast(1.0)
+                val currentRx = android.net.TrafficStats.getTotalRxBytes().coerceAtLeast(0L)
+                val currentTx = android.net.TrafficStats.getTotalTxBytes().coerceAtLeast(0L)
+                val dlKbps = (((currentRx - lastRxBytes).coerceAtLeast(0L) * 8.0) / (1000.0 * elapsedSec)).toInt()
+                val ulKbps = (((currentTx - lastTxBytes).coerceAtLeast(0L) * 8.0) / (1000.0 * elapsedSec)).toInt()
+                lastRxBytes = currentRx
+                lastTxBytes = currentTx
+                lastSampleMs = nowMs
+
                 _telemetry.value = _telemetry.value.copy(
-                    cpuUsage = cpu,
-                    ramUsedMb = ram,
-                    downloadSpeedKbps = dl,
-                    uploadSpeedKbps = ul
+                    cpuUsage = cpuEstimate,
+                    ramUsedMb = ramUsed,
+                    ramTotalMb = ramTotal,
+                    batteryLevel = batLevel,
+                    batteryTemp = batTemp,
+                    storageUsedGb = storageUsedGb,
+                    storageTotalGb = storageTotalGb,
+                    downloadSpeedKbps = dlKbps,
+                    uploadSpeedKbps = ulKbps,
+                    jniStatus = NexusJniBridge.getBridgeStatus(),
+                    nativeVersion = NexusJniBridge.getCoreVersion()
                 )
+                delay(3000)
             }
         }
     }
@@ -482,6 +542,27 @@ class NexusViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val audit = core.storageGovernor.verifyIsolationAndNonExceedance()
             appendTerminalLog("STORAGE GOVERNOR AUDIT: Zéro Contamination: ${audit.isZeroContaminationVerified} | Plafond 1 Go Respecté: ${audit.systemStorageCompliantWith1GbCap} (${audit.proofSignature})")
+        }
+    }
+
+    fun configureGoogleDriveAccessToken(token: String?) {
+        viewModelScope.launch {
+            core.storageGovernor.configureGoogleDriveAccessToken(token)
+            val state = core.storageGovernor.driveConnectionState.value
+            appendTerminalLog("GOOGLE DRIVE SERVICE: État de connexion mis à jour -> $state")
+        }
+    }
+
+    fun synchronizeGoogleDriveStorage() {
+        viewModelScope.launch {
+            appendTerminalLog("GOOGLE DRIVE SERVICE: Synchronisation REST API v3 (appDataFolder & NEXUS_USER_STORAGE)...")
+            val ok = core.storageGovernor.synchronizeWithGoogleDrive()
+            if (ok) {
+                val proof = core.storageGovernor.lastDriveSyncProof.value ?: "VERIFIED"
+                appendTerminalLog("GOOGLE DRIVE SERVICE: Synchronisation terminée [$proof].")
+            } else {
+                appendTerminalLog("GOOGLE DRIVE SERVICE: Synchronisation interrompue (vérifiez le jeton OAuth2 ou la connexion réseau).")
+            }
         }
     }
 

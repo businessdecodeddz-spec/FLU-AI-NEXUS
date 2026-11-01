@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">FLU-AI NEXUS</string>
+    <string name="google_oauth_client_id" translatable="false">44519688170-6qrbiemdbvg2u1sgj57s32sc6846shm1.apps.googleusercontent.com</string>
+    <string name="google_cloud_project_id" translatable="false">gen-lang-client-0700572400</string>
 </resources>

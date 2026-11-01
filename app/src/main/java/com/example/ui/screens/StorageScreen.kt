@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -17,8 +16,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.core.StorageItemRecord
-import com.example.core.StorageSpaceType
+import com.example.data.cloud.DriveConnectionState
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.NexusViewModel
 
@@ -32,8 +30,11 @@ fun StorageScreen(
     val systemItems by viewModel.systemStorageItems.collectAsState()
     val userItems by viewModel.userStorageItems.collectAsState()
     val governorLogs by viewModel.storageGovernorLogs.collectAsState()
+    val driveConnectionState by viewModel.driveConnectionState.collectAsState()
+    val lastDriveSyncProof by viewModel.lastDriveSyncProof.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = Hybride Cloud Governor, 1 = Exploration Locale
+    var oauthTokenInput by remember { mutableStateOf("") }
 
     LazyColumn(
         modifier = modifier
@@ -84,6 +85,115 @@ fun StorageScreen(
         }
 
         if (selectedTab == 0) {
+            // 0. GOOGLE DRIVE API v3 SERVICE LAYER CARD
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = DeepObsidian),
+                    shape = RoundedCornerShape(12.dp),
+                    border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(ElectricBlue)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(imageVector = Icons.Default.CloudQueue, contentDescription = null, tint = ElectricCyan, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(text = "SERVICE LAYER GOOGLE DRIVE API v3", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
+                            val badgeColor = when (driveConnectionState) {
+                                DriveConnectionState.CONNECTED_VERIFIED, DriveConnectionState.AUTHENTICATED_READY -> CyberGreen
+                                DriveConnectionState.SYNC_IN_PROGRESS -> CyberAmber
+                                DriveConnectionState.NETWORK_OR_API_ERROR -> CyberRed
+                                DriveConnectionState.UNAUTHENTICATED_OAUTH_REQUIRED -> CyberYellow
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .background(badgeColor.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(text = driveConnectionState.name, color = badgeColor, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "État Connecteur: ${quotaStatus.cloudConnectorState}",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                        Text(
+                            text = "Projet Cloud: ${com.example.data.cloud.GoogleDriveStorageService.PROVISIONED_PROJECT_ID} | Client OAuth: ${com.example.data.cloud.GoogleDriveStorageService.PROVISIONED_OAUTH_CLIENT_ID.take(26)}...",
+                            color = ElectricCyan,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            text = "Scopes OAuth2: drive.appdata (Système 1 Go max) | drive.file (Dossier NEXUS_USER_STORAGE)",
+                            color = TextMuted,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        if (lastDriveSyncProof != null) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Dernière Preuve API: $lastDriveSyncProof",
+                                color = CyberGreen,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = oauthTokenInput,
+                            onValueChange = { oauthTokenInput = it },
+                            label = { Text("Jeton OAuth2 Bearer Google Drive (optionnel en mode local)", fontSize = 10.sp) },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("input_drive_oauth_token"),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = ElectricCyan,
+                                unfocusedBorderColor = CardBorder,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            )
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { viewModel.configureGoogleDriveAccessToken(oauthTokenInput) },
+                                colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("btn_configure_drive_oauth")
+                            ) {
+                                Text("Configurer Jeton OAuth", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Button(
+                                onClick = { viewModel.synchronizeGoogleDriveStorage() },
+                                colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan, contentColor = DeepObsidian),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("btn_sync_google_drive")
+                            ) {
+                                Text("Synchroniser Drive v3", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+
             // 1. NEXUS SYSTEM STORAGE CARD (1 GB Absolute Ceiling Cap Enforced)
             item {
                 Card(
@@ -101,7 +211,7 @@ fun StorageScreen(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(imageVector = Icons.Default.AdminPanelSettings, contentDescription = null, tint = ElectricCyan, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text(text = "1. NEXUS SYSTEM STORAGE", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Text(text = "1. NEXUS SYSTEM STORAGE (appDataFolder)", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                             }
                             Box(
                                 modifier = Modifier
@@ -114,7 +224,7 @@ fun StorageScreen(
 
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Contient exclusivement les configurations, index, journaux techniques et métadonnées. Règle absolue de non-dépassement appliquée par le Governor.",
+                            text = "Contient exclusivement les configurations, index, journaux techniques et métadonnées dans l'espace isolé Google Drive appDataFolder. Règle absolue de non-dépassement (1000 Mo).",
                             color = TextSecondary,
                             fontSize = 11.sp
                         )
@@ -142,6 +252,16 @@ fun StorageScreen(
                             color = if (quotaStatus.isSystemCapExceeded) CyberRed else ElectricCyan,
                             trackColor = CardBorder
                         )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        systemItems.take(4).forEach { item ->
+                            Text(
+                                text = "• ${item.name} (${item.sizeMb} Mo) -> [${item.driveSpaceTarget}] ID:${item.remoteDriveId ?: "N/A"}",
+                                color = TextMuted,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
                     }
                 }
             }
@@ -163,7 +283,7 @@ fun StorageScreen(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(imageVector = Icons.Default.Cloud, contentDescription = null, tint = CyberGreen, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text(text = "2. NEXUS USER STORAGE (Google Drive)", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Text(text = "2. NEXUS USER STORAGE (Google Drive)", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                             }
                             Box(
                                 modifier = Modifier
@@ -176,7 +296,7 @@ fun StorageScreen(
 
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Contient les documents personnels, photos, vidéos, projets et archives. Aucune limite fixe de 1 Go ne lui est appliquée.",
+                            text = "Contient les documents personnels, photos, vidéos, projets et archives dans le dossier isolé NEXUS_USER_STORAGE. Aucune limite fixe de 1 Go ne lui est appliquée.",
                             color = TextSecondary,
                             fontSize = 11.sp
                         )
@@ -192,6 +312,16 @@ fun StorageScreen(
                                 color = CyberGreen,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 12.sp
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        userItems.take(4).forEach { item ->
+                            Text(
+                                text = "• ${item.name} (${item.sizeMb} Mo) -> [${item.driveSpaceTarget}] ID:${item.remoteDriveId ?: "N/A"}",
+                                color = TextMuted,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace
                             )
                         }
                     }
